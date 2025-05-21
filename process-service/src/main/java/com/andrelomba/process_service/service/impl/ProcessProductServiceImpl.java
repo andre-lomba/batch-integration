@@ -1,5 +1,6 @@
 package com.andrelomba.process_service.service.impl;
 
+import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
@@ -28,10 +29,14 @@ public class ProcessProductServiceImpl implements ProcessProductService {
     public void insertBatch(List<ProcessProduct> processes, String batchId) {
         String logFilename = "insertion/insertion.log";
         long start = System.currentTimeMillis();
-        processProductRepository.insertAll(processes);
-        long duration = System.currentTimeMillis() - start;
-        writeLog(logFilename, batchId, processes.size(), duration);
-        log.info("Inseridos {} registros do lote {} em tb_process em {} ms", processes.size(), batchId, duration);
+        try {
+            processProductRepository.insertAllWithCopy(processes);
+            long duration = System.currentTimeMillis() - start;
+            writeLog(logFilename, batchId, processes.size(), duration);
+            log.info("Inseridos {} registros do lote {} em tb_process em {} ms", processes.size(), batchId, duration);
+        } catch (Exception e) {
+            writeErrorLog(logFilename, "Erro na inserção dos dados.", batchId, e);
+        }
     }
 
     private void writeLog(String fileName, String batchId, int batchSize, long duration) {
@@ -39,6 +44,22 @@ public class ProcessProductServiceImpl implements ProcessProductService {
                 String.format(
                         "%s - Lote de id %s, tamanho %d, inserido em %d ms",
                         LocalTime.now().format(logTimeFormatter), batchId, batchSize, duration));
+    }
+
+    private void writeErrorLog(String mainLogFile, String customMessage, String batchId,
+            Throwable ex) {
+        String errorFile = "insertion/insertion-errors.log";
+
+        String fullMessage = String.format("%s - Erro ao inserir dados do lote %s no banco de dados: %s\nExceção: %s\n",
+                LocalDateTime.now().format(logTimeFormatter),
+                batchId,
+                customMessage, ex.toString());
+        FileLogger.writeLog(mainLogFile, fullMessage);
+        FileLogger.writeLog(errorFile, fullMessage);
+        FileLogger.writeLog(errorFile, "Trace:");
+        for (StackTraceElement line : ex.getStackTrace()) {
+            FileLogger.writeLog(errorFile, line.toString());
+        }
     }
 
 }
