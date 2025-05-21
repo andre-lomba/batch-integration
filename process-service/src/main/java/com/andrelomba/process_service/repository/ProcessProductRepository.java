@@ -8,4 +8,6 @@ import org.springframework.stereotype.Repository;
 @Repository
 public interface ProcessProductRepository {
   void insertAll(List<ProcessProduct> processes);
+
+  void insertAllWithCopy(List<ProcessProduct> processes) throws Exception;
 }

@@ -1,13 +1,20 @@
 package com.andrelomba.process_service.repository.impl;
 
+import java.io.IOException;
 import java.io.Reader;
 import java.io.StringReader;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.util.List;
 
+import org.postgresql.copy.CopyManager;
+import org.postgresql.core.BaseConnection;
+import org.springframework.jdbc.CannotGetJdbcConnectionException;
 import org.springframework.jdbc.core.BatchPreparedStatementSetter;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceUtils;
@@ -45,14 +52,17 @@ public class ProcessProductPostgresRepository implements ProcessProductRepositor
         });
   }
 
-  public void insertAllWithCopy(List<ProcessProduct> processes) throws Exception {
+  public void insertAllWithCopy(List<ProcessProduct> processes)
+      throws IOException, CannotGetJdbcConnectionException, SQLException {
     String csv = buildCsvData(processes);
     try (Connection conn = DataSourceUtils.getConnection(jdbcTemplate.getDataSource())) {
-      CopyManager copyManager = new CopyManager((BaseConnection) conn.unwrap(BaseConnection.class));
-      Reader reader = new StringReader(csv);
-      copyManager.copyIn(
-          "COPY tb_process (batch_id, product_id, product_name, created_at, processed_at) FROM STDIN WITH (FORMAT csv)",
-          reader);
+      BaseConnection pgConn = conn.unwrap(BaseConnection.class);
+      CopyManager copyManager = new CopyManager(pgConn);
+      try (Reader reader = new StringReader(csv)) {
+        copyManager.copyIn(
+            "COPY tb_process(batch_id, product_id, product_name, created_at, processed_at) FROM STDIN WITH (FORMAT csv)",
+            reader);
+      }
     }
   }
 
