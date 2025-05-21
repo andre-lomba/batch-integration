@@ -54,11 +54,8 @@ public class KafkaProducerService {
     // Usamos um stream paralelo para aproveitar múltiplos núcleos da máquina
     List<CompletableFuture<Void>> futures = products.parallelStream()
         .map(product -> {
-          ProducerRecord<String, String> record = new ProducerRecord<>(TOPIC, batchId, product.toJson());
-          record.headers().add(new RecordHeader("type", "DATA".getBytes(StandardCharsets.UTF_8)));
-          record.headers().add(new RecordHeader("batchId", batchId.getBytes(StandardCharsets.UTF_8)));
-
-          return kafkaTemplate.send(record)
+          return sendWithType("DATA", batchId, product
+              .toJson())
               .thenAccept(result -> {
                 synchronized (successCount) {
                   successCount[0]++;
