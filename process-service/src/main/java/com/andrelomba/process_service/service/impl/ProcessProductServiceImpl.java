@@ -26,8 +26,10 @@ public class ProcessProductServiceImpl implements ProcessProductService {
         this.processProductRepository = processProductRepository;
     }
 
-    public void insertBatch(List<ProcessProduct> processes, String batchId) {
-        String logFilename = "insertion/insertion.log";
+    public void insertBatch(List<ProcessProduct> processes, String batchId, String logFileTimestamp) {
+        String logFilename = String.format("%s/insertion_%s.log",
+                logFileTimestamp,
+                logFileTimestamp);
         long start = System.currentTimeMillis();
         try {
             processProductRepository.insertAllWithCopy(processes);
@@ -35,7 +37,7 @@ public class ProcessProductServiceImpl implements ProcessProductService {
             writeLog(logFilename, batchId, processes.size(), duration);
             log.info("Inseridos {} registros do lote {} em tb_process em {} ms", processes.size(), batchId, duration);
         } catch (Exception e) {
-            writeErrorLog(logFilename, "Erro na inserção dos dados.", batchId, e);
+            writeErrorLog(logFilename, "Erro na inserção dos dados.", batchId, logFileTimestamp, e);
         }
     }
 
@@ -47,8 +49,9 @@ public class ProcessProductServiceImpl implements ProcessProductService {
     }
 
     private void writeErrorLog(String mainLogFile, String customMessage, String batchId,
+            String logFileTimestamp,
             Throwable ex) {
-        String errorFile = "insertion/insertion-errors.log";
+        String errorFile = String.format("%s/insertion-errors_%s.log", logFileTimestamp);
 
         String fullMessage = String.format("%s - Erro ao inserir dados do lote %s no banco de dados: %s\nExceção: %s\n",
                 LocalDateTime.now().format(logTimeFormatter),
