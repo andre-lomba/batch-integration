@@ -1,6 +1,7 @@
 package com.andrelomba.process_service.domain.model;
 
 import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 
 public class ProcessProduct {
 
@@ -57,6 +58,16 @@ public class ProcessProduct {
 
   public void setProcessedAt(LocalDateTime processedAt) {
     this.processedAt = processedAt;
+  }
+
+  public String toJson() {
+    return String.format(
+        "{\"batchId\":\"%s\",\"productId\":\"%s\",\"productName\":\"%s\",\"createdAt\":\"%s\",\"processedAt\":\"%s\"}",
+        batchId,
+        productId,
+        productName.replace("\"", "\\\""),
+        createdAt.format(DateTimeFormatter.ISO_LOCAL_DATE_TIME),
+        processedAt.format(DateTimeFormatter.ISO_LOCAL_DATE_TIME));
   }
 
 }
