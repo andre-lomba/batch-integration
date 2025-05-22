@@ -49,6 +49,12 @@ public class ProductMongoRepository implements ProductRepository {
     try (MongoCursor<Document> cursor = iterable.iterator()) {
       while (cursor.hasNext()) {
         Document entity = cursor.next();
+
+        // // 🔥 Simula falha proposital na leitura de dados
+        // if (entity.get("name").toString().equals("Product 10000")) {
+        // throw new com.mongodb.MongoException("Erro simulado no MongoDB");
+        // }
+
         batch.add(new Product(
             entity.getObjectId("_id"), entity.get("name").toString(),
             LocalDateTime.ofInstant(entity.getDate("createdAt").toInstant(), ZoneOffset.UTC)));
