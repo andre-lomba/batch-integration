@@ -19,6 +19,7 @@ import com.andrelomba.product_service.domain.enums.Status;
 import com.andrelomba.product_service.domain.exception.KafkaUnmatchedCountException;
 import com.andrelomba.product_service.domain.model.KafkaFooter;
 import com.andrelomba.product_service.domain.model.KafkaHeader;
+import com.andrelomba.product_service.domain.model.KafkaSendResultCounter;
 import com.andrelomba.product_service.domain.model.Product;
 import com.andrelomba.product_service.utils.FileLogger;
 
@@ -26,82 +27,118 @@ import com.andrelomba.product_service.utils.FileLogger;
 public class KafkaProducerService {
 
   private static final Logger log = LoggerFactory.getLogger(KafkaProducerService.class);
-  private static final DateTimeFormatter fileDateFormatter = DateTimeFormatter.ofPattern("dd-MM-yyyy_HH-mm-ss-SSS");
-  private final KafkaTemplate<String, String> kafkaTemplate;
+  private static final DateTimeFormatter logTimeFormatter = DateTimeFormatter.ofPattern("HH:mm:ss.SSS");
   private static final String TOPIC = "product-batch";
+  private static final String ERROR_TOPIC = "product-batch-errors";
+
+  private final KafkaTemplate<String, String> kafkaTemplate;
 
   public KafkaProducerService(KafkaTemplate<String, String> kafkaTemplate) {
     this.kafkaTemplate = kafkaTemplate;
   }
 
-  public void sendBatch(List<Product> products, String batchId, LocalDateTime processStartDateTime) {
+  public void sendBatch(List<Product> products, String batchId, String logFileTimestamp) {
     String filename = String.format("%s/kafka-header-footer_%s.log",
-        processStartDateTime.format(fileDateFormatter), processStartDateTime.format(fileDateFormatter));
+        logFileTimestamp, logFileTimestamp);
 
-    LocalDateTime startTime = LocalDateTime.now();
-
-    FileLogger.writeLog(filename,
+    FileLogger.writeLog(
+        filename,
         "====================================================================================================");
     FileLogger.writeLog(filename, String.format("Lote: %s", batchId));
+
     // Envia HEADER indicando o início de um novo lote
-    KafkaHeader header = new KafkaHeader(products.size(), startTime);
-    sendWithType("HEADER", batchId, header.toJson()).join();
-    FileLogger.writeLog(filename, String.format("Header: %s", header.toJson()));
+    KafkaHeader header = createAndSendHeader(products.size(), batchId, filename, logFileTimestamp);
 
-    final int[] successCount = { 0 };
-    final int[] errorCount = { 0 };
+    KafkaSendResultCounter result = sendBatchDataParallel(products, batchId, logFileTimestamp);
 
-    // Usamos um stream paralelo para aproveitar múltiplos núcleos da máquina
+    int success = result.getSuccessCount();
+    int errors = result.getErrorCount();
+
+    // Envia FOOTER com a quantidade real enviada
+    KafkaFooter footer = createAndSendFooter(success, batchId, filename, logFileTimestamp);
+
+    boolean wasSuccessful = success == products.size() && errors == 0;
+    FileLogger.writeLog(filename,
+        String.format("Status: %s", (wasSuccessful ? Status.SUCCESS : Status.ERROR).getName()));
+    FileLogger.writeLog(filename,
+        String.format("Duração: %d ms", Duration.between(header.getStartTime(), footer.getEndTime()).toMillis()));
+    FileLogger.writeLog(filename, String.format("Acertos: %d", success));
+    FileLogger.writeLog(filename, String.format("Erros: %d", errors));
+    FileLogger.writeLog(filename,
+        "====================================================================================================");
+
+    if (wasSuccessful) {
+      log.info("Lote {} com {} registros enviado para o Kafka com sucesso.", batchId, success);
+    } else {
+      log.error("Lote {} apresentou erro no envio de {} registros.", batchId, errors);
+      throw new KafkaUnmatchedCountException("Ocorreram erros na carga do Kafka.");
+    }
+  }
+
+  private KafkaHeader createAndSendHeader(int recordsSize, String batchId, String logFilename,
+      String logFileTimestamp) {
+    LocalDateTime startTime = LocalDateTime.now();
+    KafkaHeader header = new KafkaHeader(recordsSize, startTime);
+    sendWithType("HEADER", logFileTimestamp, batchId, header.toJson()).join();
+    FileLogger.writeLog(logFilename, String.format("Header: %s", header.toJson()));
+    return header;
+  }
+
+  private KafkaSendResultCounter sendBatchDataParallel(
+      List<Product> products,
+      String batchId,
+      String logFileTimestamp) {
+    KafkaSendResultCounter counter = new KafkaSendResultCounter();
+
     List<CompletableFuture<Void>> futures = products.parallelStream()
         .map(product -> {
-          return sendWithType("DATA", batchId, product
-              .toJson())
+          return sendWithType("DATA", logFileTimestamp, batchId, product.toJson())
               .thenAccept(result -> {
-                synchronized (successCount) {
-                  successCount[0]++;
+                synchronized (counter) {
+                  counter.incrementSuccessCount();
                 }
               })
               .exceptionally(ex -> {
-                synchronized (errorCount) {
-                  errorCount[0]++;
+                synchronized (counter) {
+                  counter.incrementErrorCount();
                 }
-                log.error("Erro ao enviar produto {} do lote {}: {}", product.getId(), batchId, ex.getMessage(), ex);
-                writeErrorAndSendToErrorTopic(product, batchId, processStartDateTime, ex);
+                writeErrorAndSendToErrorTopic(product, batchId, logFileTimestamp, ex);
                 return null;
               });
         })
         .toList();
 
-    // Aguarda todos os envios antes de prosseguir
     CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
 
-    LocalDateTime endTime = LocalDateTime.now();
-    // Envia FOOTER com a quantidade real enviada
-    KafkaFooter footer = new KafkaFooter(successCount[0], endTime);
-    sendWithType("FOOTER", batchId, footer.toJson()).join();
-
-    boolean wasSuccessful = successCount[0] == products.size() && errorCount[0] == 0;
-    FileLogger.writeLog(filename, String.format("Footer: %s", footer.toJson()));
-    FileLogger.writeLog(filename,
-        String.format("Status: %s", (wasSuccessful ? Status.SUCCESS : Status.ERROR).getName()));
-    FileLogger.writeLog(filename, String.format("Duração: %d ms", Duration.between(startTime, endTime).toMillis()));
-    FileLogger.writeLog(filename, String.format("Acertos: %d", successCount[0]));
-    FileLogger.writeLog(filename, String.format("Erros: %d", errorCount[0]));
-    FileLogger.writeLog(filename,
-        "====================================================================================================");
-
-    if (wasSuccessful) {
-      log.info("Lote {} com {} registros enviado para o Kafka com sucesso.", batchId, successCount[0]);
-    } else {
-      log.error("Lote {} apresentou erro no envio de {} registros.", batchId, errorCount[0]);
-      throw new KafkaUnmatchedCountException("Ocorreram erros na carga do Kafka.");
-    }
+    return counter;
   }
 
-  // Método auxiliar para enviar mensagens com HEADER ou FOOTER
-  private CompletableFuture<SendResult<String, String>> sendWithType(String type, String batchId, String value) {
+  private KafkaFooter createAndSendFooter(int successCount, String batchId, String logFilename,
+      String logFileTimestamp) {
+    LocalDateTime endTime = LocalDateTime.now();
+    // Envia FOOTER com a quantidade real enviada
+    KafkaFooter footer = new KafkaFooter(successCount, endTime);
+    sendWithType("FOOTER", logFileTimestamp, batchId, footer.toJson()).join();
+    FileLogger.writeLog(logFilename, String.format("Footer: %s", footer.toJson()));
+    return footer;
+  }
+
+  // Método auxiliar para enviar mensagens
+  private CompletableFuture<SendResult<String, String>> sendWithType(String type, String logFileTimestamp,
+      String batchId, String value) {
+
+    // // 🔥 Simula falha proposital no producer
+    // if (value.contains("Product 10000")) {
+    // CompletableFuture<SendResult<String, String>> failed = new
+    // CompletableFuture<>();
+    // failed.completeExceptionally(new RuntimeException("Erro simulado ao enviar ao
+    // Kafka"));
+    // return failed;
+    // }
+
     ProducerRecord<String, String> record = new ProducerRecord<>(TOPIC, batchId, value);
     record.headers().add(new RecordHeader("type", type.getBytes(StandardCharsets.UTF_8)));
+    record.headers().add(new RecordHeader("logFileTimestamp", logFileTimestamp.getBytes(StandardCharsets.UTF_8)));
     record.headers().add(new RecordHeader("batchId", batchId.getBytes(StandardCharsets.UTF_8)));
 
     CompletableFuture<SendResult<String, String>> future = kafkaTemplate.send(record);
@@ -114,31 +151,37 @@ public class KafkaProducerService {
   }
 
   private void writeErrorAndSendToErrorTopic(Product product, String batchId,
-      LocalDateTime processStartTime,
+      String logFileTimestamp,
       Throwable ex) {
     String errorFile = String.format("%s/kafka-error_%s.log",
-        processStartTime.format(fileDateFormatter), processStartTime.format(fileDateFormatter));
+        logFileTimestamp, logFileTimestamp);
     String payload = product.toJson();
-
-    // Mensagem customizada por categoria
     String customMessage = "Ocorreram erros na carga do Kafka.";
-    String fullMessage = String.format("Erro ao enviar registro ID %s do batch %s: %s\nExceção: %s\n",
+    String fullMessage = String.format("%s - Erro ao enviar registro ID %s do batch %s: %s\nExceção: %s",
+        LocalDateTime.now().format(logTimeFormatter),
         product.getId(), batchId, customMessage, ex.toString());
+
+    log.error("Erro ao enviar produto {} do lote {}: {}", product.getId(), batchId, ex.getMessage(), ex);
+
+    FileLogger.writeLog(
+        errorFile,
+        "====================================================================================================");
     FileLogger.writeLog(errorFile, fullMessage);
     FileLogger.writeLog(errorFile, "Trace:");
     for (StackTraceElement line : ex.getStackTrace()) {
       FileLogger.writeLog(errorFile, line.toString());
     }
-    FileLogger.writeLog(errorFile, "Payload com erro: " + payload);
 
+    FileLogger.writeLog(errorFile, "Payload com erro: " + payload);
     // Envia para tópico de erro
-    ProducerRecord<String, String> errorRecord = new ProducerRecord<>("product-error-batch", batchId,
-        payload);
-    errorRecord.headers().add(new RecordHeader("type",
-        "ERROR".getBytes(StandardCharsets.UTF_8)));
-    errorRecord.headers()
-        .add(new RecordHeader("originalBatchId",
-            batchId.getBytes(StandardCharsets.UTF_8)));
+    ProducerRecord<String, String> errorRecord = new ProducerRecord<>(ERROR_TOPIC, batchId, payload);
+    errorRecord.headers().add(new RecordHeader("type", "ERROR".getBytes(StandardCharsets.UTF_8)));
+    errorRecord.headers().add(new RecordHeader("originalBatchId", batchId.getBytes(StandardCharsets.UTF_8)));
     kafkaTemplate.send(errorRecord);
+
+    FileLogger.writeLog(errorFile, String.format("Payload enviado para tópico %s", ERROR_TOPIC));
+    FileLogger.writeLog(
+        errorFile,
+        "====================================================================================================");
   }
 }
